@@ -1,19 +1,29 @@
-import cv2 as cv
+from ultralytics import YOLO
 import numpy as np
+import cv2
+import csv
+import os
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
 import json
-import pandas as pd
-import time
 
-# Load YOLO model (Replace paths with actual YOLO model paths)
-# Replace with your trained model file
-YOLO_WEIGHTS = "./models/yolo/best.onnx"
-YOLO_CONFIDENCE_THRESHOLD = 0.5
+# Initialize model and other variables
+data = []
+poly = PolynomialFeatures(degree=2)
+model = LinearRegression()
 
-# Real-world diameter of the softball in mm (adjust accordingly)
-REAL_DIAMETER_MM = 97.0  # Standard softball size (change if needed)
+data_file = './data/softball_data.csv'
+snapshot_dir = './data/snapshots'
 
-# CSV file to save collected data
-DATASET_FILE = "ball_distance_dataset.csv"
+data_counter = 0
+input_distance = ""
+snapshot_taken = False
+x, y, r = 0, 0, 0
+
+height_of_camera = 1.0  # meters
+
+# Load YOLO model
+yolo_model = YOLO("./models/yolo/yolo11l.pt")
 
 
 def load_calibration(calibration_file="calibration_data.json"):
@@ -24,109 +34,191 @@ def load_calibration(calibration_file="calibration_data.json"):
     return np.array(calibration_data["mtx"]), np.array(calibration_data["dist"])
 
 
+def load_data():
+    if os.path.exists(data_file):
+        with open(data_file, 'r') as file:
+            reader = csv.reader(file)
+            for row in reader:
+                data.append(tuple(map(float, row)))
+        print(f"Loaded {len(data)} data points from {data_file}.")
+    else:
+        print("No data file found. Starting fresh.")
+
+
+def save_data():
+    with open(data_file, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerows(data)
+    print(f"Data saved to {data_file}.")
+
+
+def predict_distance(x, y, radius):
+    X_test = np.array([[x, y, radius]])
+    X_test_poly = poly.transform(X_test)
+    return model.predict(X_test_poly)[0]
+
+
+def detect_ball(frame):
+    results = yolo_model(frame)
+    detections = results[0].boxes
+
+    if detections is None or len(detections) == 0:
+        return None
+
+    # Convert detections to list of indices where class == 32
+    filtered = [box for box in detections if int(box.cls[0]) == 32]
+
+    if not filtered:
+        return None
+
+    # Pick the detection with highest confidence
+    best = max(filtered, key=lambda b: b.conf)
+    x1, y1, x2, y2 = best.xyxy[0].tolist()
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+    radius = (x2 - x1) / 2  # approximate radius
+
+    return int(cx), int(cy), int(radius)
+
+
 def undistort_image(image, camera_matrix, dist_coeffs):
     """Undistorts an image using preloaded calibration data."""
-    return cv.undistort(image, camera_matrix, dist_coeffs)
+    return cv2.undistort(image, camera_matrix, dist_coeffs)
 
 
-def load_yolo_model():
-    """Loads the YOLO model using ONNX."""
-    net = cv.dnn.readNetFromONNX(YOLO_WEIGHTS)
-    return net
-
-
-def detect_softball(frame, net):
-    """Runs YOLO object detection on a frame to detect a softball."""
-    layers_names = net.getLayerNames()
-    output_layers = [layers_names[i[0] - 1]
-                     for i in net.getUnconnectedOutLayers()]
-    height, width, channels = frame.shape
-    blob = cv.dnn.blobFromImage(
-        frame, scalefactor=1/255.0, size=(640, 640), swapRB=True, crop=False)
-    net.setInput(blob)
-    outputs = net.forward(output_layers)
-
-    detected_balls = []
-
-    for detection in outputs[0]:
-        scores = detection[5:]
-        class_id = np.argmax(scores)
-        confidence = scores[class_id]
-
-        if confidence > YOLO_CONFIDENCE_THRESHOLD:
-            # Get bounding box
-            center_x, center_y, w, h = (
-                detection[:4] * np.array([width, height, width, height])).astype(int)
-
-            detected_balls.append(
-                (center_x, center_y, w))  # (X, Y, Diameter)
-
-    return detected_balls
-
-
-def save_data(x, y, pixel_diameter, real_diameter, true_distance):
-    """Saves data to a CSV file."""
-    data = pd.DataFrame([[x, y, pixel_diameter, real_diameter, true_distance]],
-                        columns=["Ball X (px)", "Ball Y (px)", "Pixel Diameter (px)", "Real Diameter (mm)", "True Distance (mm)"])
-
-    try:
-        existing_data = pd.read_csv(DATASET_FILE)
-        updated_data = pd.concat([existing_data, data], ignore_index=True)
-    except FileNotFoundError:
-        updated_data = data  # Create new file if none exists
-
-    updated_data.to_csv(DATASET_FILE, index=False)
-    print(
-        f"Data saved: X={x}, Y={y}, Diameter={pixel_diameter}, Distance={true_distance}mm")
-
-
-def collect_data():
-    """Runs the video capture, undistorts frames, detects the ball, and logs data."""
+def capture_and_process_data():
+    global input_distance, snapshot_taken, x, y, r, data_counter
+    cap = cv2.VideoCapture(0)
     camera_matrix, dist_coeffs = load_calibration()
-    yolo_net = load_yolo_model()
 
-    cap = cv.VideoCapture(0)
+    paused_frame = None  # Holds the frozen frame after snapshot
 
-    print("Press 'Enter' to log detected ball data, or 'q' to quit.")
+    while True:
+        if not snapshot_taken:
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to capture image")
+                break
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
+            undistorted_frame = undistort_image(
+                frame, camera_matrix, dist_coeffs)
+
+            result = detect_ball(undistorted_frame)
+            if result:
+                x_circle, y_circle, radius = result
+                cv2.circle(frame, (x_circle, y_circle),
+                           radius, (0, 255, 255), 2)
+                cv2.putText(frame, f"Radius: {radius} px", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
+                cv2.putText(frame, f"Position: ({x_circle}, {y_circle})", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
+
+            cv2.putText(frame, f"Distance (input): {input_distance}", (10, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 0), 2)
+
+            cv2.imshow("Frame", frame)
+        else:
+            # Display frozen frame for input
+            display_frame = paused_frame.copy()
+            cv2.putText(display_frame, f"Distance (input): {input_distance}", (10, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+            cv2.imshow("Frame", display_frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('t') and result and not snapshot_taken:
+            x, y, r = result
+            paused_frame = frame.copy()
+            snapshot_taken = True
+            print(
+                f"Snapshot taken. Paused for input. x={x}, y={y}, radius={r}")
+
+        elif snapshot_taken:
+            if key >= ord('0') and key <= ord('9'):
+                input_distance += chr(key)
+            elif key == ord('.'):
+                input_distance += '.'
+            elif key == 13:  # Enter
+                try:
+                    # Save snapshot
+                    data_counter += 1
+                    snapshot_filename = f"snapshot_{data_counter}.png"
+                    snapshot_path = os.path.join(
+                        snapshot_dir, snapshot_filename)
+                    os.makedirs(snapshot_dir, exist_ok=True)
+                    cv2.imwrite(snapshot_path, paused_frame)
+
+                    # Save data
+                    distance = float(input_distance)
+                    data.append((x, y, r, distance, data_counter))
+                    print(
+                        f"Data saved: x={x}, y={y}, r={r}, distance={distance}, id={data_counter}")
+
+                    # Reset input state
+                    input_distance = ""
+                    snapshot_taken = False
+                    paused_frame = None
+                except ValueError:
+                    print("Invalid input. Please enter a valid number.")
+
+        elif key == ord('q'):
             break
-
-        # Undistort the frame
-        undistorted_frame = undistort_image(frame, camera_matrix, dist_coeffs)
-
-        # Detect the softball
-        detected_balls = detect_softball(undistorted_frame, yolo_net)
-
-        for (x, y, w) in detected_balls:
-            # Draw detection
-            cv.circle(undistorted_frame, (x, y),  w//2, (0, 255, 0), 2)
-            cv.putText(undistorted_frame, f"Size: {w}px", (x, y - 10),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        cv.imshow("Undistorted Live Feed - Ball Detection", undistorted_frame)
-
-        key = cv.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('\r') and detected_balls:
-            # Log data for the first detected ball
-            (x, y, pixel_diameter) = detected_balls[0]
-
-            # Manually enter the actual measured distance
-            true_distance = input("Enter the true distance (mm): ")
-            try:
-                true_distance = float(true_distance)
-                save_data(x, y, pixel_diameter,
-                          REAL_DIAMETER_MM, true_distance)
-            except ValueError:
-                print("Invalid input. Please enter a numerical value.")
 
     cap.release()
-    cv.destroyAllWindows()
+    cv2.destroyAllWindows()
+    save_data()
 
 
-if __name__ == "__main__":
-    collect_data()
+def fit_model():
+    if len(data) < 5:
+        print("Not enough data to fit the model. Collect more samples.")
+        return
+    data_np = np.array(data)
+    X = np.column_stack((data_np[:, 0], data_np[:, 1], data_np[:, 2]))
+    y = data_np[:, 3]
+    X_poly = poly.fit_transform(X)
+    model.fit(X_poly, y)
+    print("Model trained successfully!")
+
+
+def real_time_prediction():
+    cap = cv2.VideoCapture(0)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to capture image")
+            break
+
+        result = detect_ball(frame)
+        if result:
+            x_circle, y_circle, radius = result
+            predicted_distance = predict_distance(x_circle, y_circle, radius)
+
+            height, width, _ = frame.shape
+            center_y = height // 2
+            angle = -1 * np.arctan((y_circle - center_y) / 6.61554918e+03)
+            height_from_cam = predicted_distance * np.tan(angle)
+            total_height = height_of_camera + height_from_cam
+
+            cv2.circle(frame, (x_circle, y_circle), radius, (0, 255, 255), 2)
+            cv2.putText(frame, f"Distance: {predicted_distance:.2f} yd", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+            cv2.putText(frame, f"Angle: {angle:.2f} rad", (10, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+            cv2.putText(frame, f"Height: {total_height:.2f} yd", (10, 180),
+                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+
+        cv2.imshow("Frame", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+load_data()
+capture_and_process_data()
+fit_model()
+real_time_prediction()
