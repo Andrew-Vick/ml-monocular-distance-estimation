@@ -9,9 +9,6 @@ import json
 
 # Initialize model and other variables
 data = []
-poly = PolynomialFeatures(degree=2)
-model = LinearRegression()
-
 data_file = './data/softball_data.csv'
 snapshot_dir = './data/snapshots'
 
@@ -34,28 +31,11 @@ def load_calibration(calibration_file="calibration_data.json"):
     return np.array(calibration_data["mtx"]), np.array(calibration_data["dist"])
 
 
-def load_data():
-    if os.path.exists(data_file):
-        with open(data_file, 'r') as file:
-            reader = csv.reader(file)
-            for row in reader:
-                data.append(tuple(map(float, row)))
-        print(f"Loaded {len(data)} data points from {data_file}.")
-    else:
-        print("No data file found. Starting fresh.")
-
-
 def save_data():
     with open(data_file, 'w', newline='') as file:
         writer = csv.writer(file)
         writer.writerows(data)
     print(f"Data saved to {data_file}.")
-
-
-def predict_distance(x, y, radius):
-    X_test = np.array([[x, y, radius]])
-    X_test_poly = poly.transform(X_test)
-    return model.predict(X_test_poly)[0]
 
 
 def detect_ball(frame):
@@ -169,56 +149,4 @@ def capture_and_process_data():
     save_data()
 
 
-def fit_model():
-    if len(data) < 5:
-        print("Not enough data to fit the model. Collect more samples.")
-        return
-    data_np = np.array(data)
-    X = np.column_stack((data_np[:, 0], data_np[:, 1], data_np[:, 2]))
-    y = data_np[:, 3]
-    X_poly = poly.fit_transform(X)
-    model.fit(X_poly, y)
-    print("Model trained successfully!")
-
-
-def real_time_prediction():
-    cap = cv2.VideoCapture(0)
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to capture image")
-            break
-
-        result = detect_ball(frame)
-        if result:
-            x_circle, y_circle, radius = result
-            predicted_distance = predict_distance(x_circle, y_circle, radius)
-
-            height, width, _ = frame.shape
-            center_y = height // 2
-            angle = -1 * np.arctan((y_circle - center_y) / 6.61554918e+03)
-            height_from_cam = predicted_distance * np.tan(angle)
-            total_height = height_of_camera + height_from_cam
-
-            cv2.circle(frame, (x_circle, y_circle), radius, (0, 255, 255), 2)
-            cv2.putText(frame, f"Distance: {predicted_distance:.2f} yd", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
-            cv2.putText(frame, f"Angle: {angle:.2f} rad", (10, 120),
-                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
-            cv2.putText(frame, f"Height: {total_height:.2f} yd", (10, 180),
-                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
-
-        cv2.imshow("Frame", frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-load_data()
 capture_and_process_data()
-fit_model()
-real_time_prediction()
