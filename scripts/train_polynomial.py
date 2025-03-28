@@ -46,58 +46,16 @@ def undistort_image(image, camera_matrix, dist_coeffs):
     return cv2.undistort(image, camera_matrix, dist_coeffs)
 
 
-# def load_data():
-#     if os.path.exists(data_file):
-#         with open(data_file, 'r') as file:
-#             reader = csv.reader(file)
-#             for row in reader:
-#                 row.pop()  # Remove the last column (snapshot id)
-#                 data.append(tuple(map(float, row)))
-#         print(f"Loaded {len(data)} data points from {data_file}.")
-#     else:
-#         print("No data file found. Starting fresh.")
-
 def load_data():
-    global data
-    mtx, _ = load_calibration()
-    f_pixels = mtx[0, 0]
-    pixel_size = FOCAL_LENGTH_MM / f_pixels
-
     if os.path.exists(data_file):
         with open(data_file, 'r') as file:
             reader = csv.reader(file)
             for row in reader:
-                row.pop()  # Remove snapshot id
-                x, y, r, dist = map(float, row)
-                phys_dist = physics_distance(
-                    FOCAL_LENGTH_MM, REAL_DIAMETER_MM, r, pixel_size)
-                correction = dist - phys_dist
-                data.append((x, y, r, phys_dist, correction))  # Extended row
+                row.pop()  # Remove the last column (snapshot id)
+                data.append(tuple(map(float, row)))
         print(f"Loaded {len(data)} data points from {data_file}.")
     else:
         print("No data file found. Starting fresh.")
-
-
-# NEW TRAINING CODE USES PHYSICS TO CALCULATE DISTANCE
-
-
-def fit_hybrid_model():
-    if len(data) < 5:
-        print("Not enough data.")
-        return
-
-    data_np = np.array(data)
-    X = data_np[:, 0:3]  # x, y, radius
-    y_correction = data_np[:, 4]  # target is the correction
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_correction, test_size=0.2, random_state=42)
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    mse = mean_squared_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-    print(f"Correction Model - MSE: {mse:.4f}, R²: {r2:.4f}")
 
 
 def split_and_train():
@@ -146,54 +104,12 @@ def split_and_train():
     plt.show()
 
     # Plotting 3D surface
-    # Generate a grid over x and y
-    x_vals = np.linspace(0, 640, 50)  # image width range
-    y_vals = np.linspace(0, 480, 50)  # image height range
-    x_grid, y_grid = np.meshgrid(x_vals, y_vals)
+    # Prepare real datafrom sklearn.neighbors import NearestNeighbors
 
-    # Fixed radius (e.g. average from dataset)
-    radius_fixed = np.mean([d[2] for d in data])
-
-    # Flatten and create input array for predictions
-    X_input = np.column_stack(
-        (x_grid.ravel(), y_grid.ravel(), np.full(x_grid.size, radius_fixed)))
-    z_pred = model.predict(X_input).reshape(x_grid.shape)
-
-    # Plot
-    fig = plt.figure(figsize=(10, 7))
-    ax = fig.add_subplot(111, projection='3d')
-    surf = ax.plot_surface(x_grid, y_grid, z_pred, cmap='viridis', alpha=0.8)
-
-    ax.set_xlabel('X (pixel)')
-    ax.set_ylabel('Y (pixel)')
-    ax.set_zlabel('Predicted Distance (m)')
-    ax.set_title('Predicted Distance Surface (Fixed Radius)')
-    fig.colorbar(surf, shrink=0.5, aspect=5)
-    plt.tight_layout()
-    plt.savefig("3d_surface_fixed_radius.png")
-    plt.show()
-
-
-def physics_distance(focal_length_mm, real_diameter_mm, pixel_radius, pixel_size_mm):
-    # Convert diameter to pixel diameter (radius * 2)
-    pixel_diameter = pixel_radius * 2
-    return (focal_length_mm * real_diameter_mm) / (pixel_diameter * pixel_size_mm)
-
-
-# def predict_distance(x, y, radius):
-#     X_test = np.array([[x, y, radius]])
-#     X_test_poly = model.transform(X_test)
-#     return model.predict(X_test_poly)[0]
 
 def predict_distance(x, y, radius):
-    mtx, _ = load_calibration()
-    f_pixels = mtx[0, 0]
-    pixel_size = FOCAL_LENGTH_MM / f_pixels
-
-    physics_est = physics_distance(
-        FOCAL_LENGTH_MM, REAL_DIAMETER_MM, radius, pixel_size)
-    correction = model.predict([[x, y, radius]])[0]
-    return physics_est + correction
+    X_test = np.array([[x, y, radius]])
+    return model.predict(X_test)[0]
 
 
 def detect_ball(frame):
@@ -246,9 +162,74 @@ def real_time_prediction():
     cv2.destroyAllWindows()
 
 
-# load_data()                   # Step 1: Load data from CSV
-# split_and_train()            # Step 2: Train model and evaluate
+def plot_error_histogram():
+    import matplotlib.pyplot as plt
+    from sklearn.model_selection import train_test_split
+    import numpy as np
+
+    data_np = np.array(data)
+    X = np.column_stack(
+        (data_np[:, 0], data_np[:, 1], data_np[:, 2]))  # u, v, d
+    y = data_np[:, 3]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42)
+    y_pred = model.predict(X_test)
+
+    errors = y_pred - y_test
+
+    plt.figure(figsize=(8, 6))
+    plt.hist(errors, bins=20, color='skyblue', edgecolor='black')
+    plt.axvline(0, color='red', linestyle='--')
+    plt.title("Histogram of Prediction Errors")
+    plt.xlabel("Prediction Error (m)")
+    plt.ylabel("Frequency")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("histogram_prediction_errors.png")
+    plt.show()
+
+
+def plot_distance_surface_by_radius():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+
+    data_np = np.array(data)
+    u = data_np[:, 0]
+    v = data_np[:, 1]
+
+    radius_levels = [5, 10, 15, 20]  # Choose 3 meaningful ball sizes
+    u_range = np.linspace(min(u), max(u), 30)
+    v_range = np.linspace(min(v), max(v), 30)
+    u_grid, v_grid = np.meshgrid(u_range, v_range)
+
+    fig = plt.figure(figsize=(14, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    for r_fixed in radius_levels:
+        X_features = np.column_stack((
+            u_grid.ravel(), v_grid.ravel(), np.full(u_grid.size, r_fixed)
+        ))
+        Z_pred = model.predict(X_features).reshape(u_grid.shape)
+        print(f"Predicting for radius: {r_fixed}, distnce shape: {Z_pred}")
+        ax.plot_surface(u_grid, v_grid, Z_pred, alpha=0.7,
+                        label=f"r={r_fixed}", cmap='viridis')
+        ax.text(u_grid[0, -1], v_grid[-1, 0], Z_pred[-1, -1],
+                f"r={r_fixed}", color='black', fontsize=10, weight='bold')
+
+    ax.set_title("Predicted Distance Surface at Fixed Radii")
+    ax.set_xlabel("u (image x-pos)")
+    ax.set_ylabel("v (image y-pos)")
+    ax.set_zlabel("Predicted Distance (m)")
+    plt.tight_layout()
+    plt.savefig("predicted_distance_surface_by_radius.png")
+    plt.show()
+
+
+load_data()                   # Step 1: Load data from CSV
+split_and_train()            # Step 2: Train model and evaluate
+# Optional: Visualize distance surface by radius
+plot_distance_surface_by_radius()
+plot_error_histogram()  # Step 4: Plot histogram of prediction errors
 # real_time_prediction()       # Step 3: Live video + prediction
-load_data()
-fit_hybrid_model()
-real_time_prediction()
