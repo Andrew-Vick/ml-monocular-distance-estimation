@@ -35,10 +35,6 @@ def load_calibration(calibration_file="calibration_data.json"):
 
 # Constants for physics calculation
 mtx, dist = load_calibration()
-FOCAL_LENGTH_PIXELS = mtx[0, 0]  # f_x from calibration
-REAL_DIAMETER_MM = 111  # mm
-FOCAL_LENGTH_MM = 3.6  # ASSUMED, APPLE DOES NOT PROVIDE THIS
-PIXEL_SIZE_MM = FOCAL_LENGTH_MM / FOCAL_LENGTH_PIXELS
 
 
 def undistort_image(image, camera_matrix, dist_coeffs):
