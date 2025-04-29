@@ -17,6 +17,7 @@ from mpl_toolkits.mplot3d import Axes3D
 data = []
 data_file = './data/softball_data.csv'
 yolo_model = YOLO("./models/yolo/yolo11l.pt")
+scaler = StandardScaler()
 
 
 def load_calibration(calibration_file="calibration_data.json"):
@@ -50,6 +51,8 @@ def split_data():
         (data_np[:, 0], data_np[:, 1], data_np[:, 2]))  # x, y, radius
     y = data_np[:, 3]  # distance
 
+    X = add_interaction_features(X)
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42)
 
@@ -57,16 +60,25 @@ def split_data():
 
 
 def scale_data(X_train, X_test):
-    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
     return X_train_scaled, X_test_scaled
 
 
+def add_interaction_features(X):
+    """Adds interaction terms to the feature set."""
+    x, y, radius = X[:, 0], X[:, 1], X[:, 2]
+    interaction_features = np.column_stack((x * radius, y * radius, radius**2))
+    return np.hstack((X, interaction_features))
+
+
 def main():
-    mlp = MLPRegressor(hidden_layer_sizes=(30, 20, 20, 10, 5), activation='relu',
-                       solver='adam', max_iter=2500, random_state=42)
+    # So far the best performing model
+    # mlp = MLPRegressor(hidden_layer_sizes=(20, 10, 5), activation='relu',
+    #                    solver='adam', max_iter=2000, random_state=42)
+    mlp = MLPRegressor(hidden_layer_sizes=(20, 10, 5), activation='relu',
+                       solver='adam', max_iter=2000, random_state=42)
     load_data()
     X_train, X_test, y_train, y_test = split_data()
     X_train_scaled, X_test_scaled = scale_data(X_train, X_test)
@@ -123,7 +135,7 @@ def main():
     u = data_np[:, 0]
     v = data_np[:, 1]
 
-    radius_levels = [5, 10, 15, 20]  # Choose 3 meaningful ball sizes
+    radius_levels = [2.5, 3.7, 5, 6.5]  # Choose 3 meaningful ball sizes
     u_range = np.linspace(min(u), max(u), 30)
     v_range = np.linspace(min(v), max(v), 30)
     u_grid, v_grid = np.meshgrid(u_range, v_range)
@@ -135,8 +147,9 @@ def main():
         X_features = np.column_stack((
             u_grid.ravel(), v_grid.ravel(), np.full(u_grid.size, r_fixed)
         ))
-        Z_pred = mlp.predict(X_features).reshape(u_grid.shape)
-        print(f"Predicting for radius: {r_fixed}, distnce shape: {Z_pred}")
+        X_features = add_interaction_features(X_features)
+        X_features_scaled = scaler.transform(X_features)
+        Z_pred = mlp.predict(X_features_scaled).reshape(u_grid.shape)
         ax.plot_surface(u_grid, v_grid, Z_pred, alpha=0.7,
                         label=f"r={r_fixed}", cmap='viridis')
         ax.text(u_grid[0, -1], v_grid[-1, 0], Z_pred[-1, -1],
